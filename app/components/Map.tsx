@@ -26,7 +26,10 @@ export default function Map() {
   const [center, setCenter] = useState<LngLat>(FALLBACK_CENTER);
   const [error, setError] = useState<string | null>(null);
 
+  // distance state
   const [km, setKm] = useState<number>(5);
+  const [kmInput, setKmInput] = useState<string>("5");
+
   const [route, setRoute] = useState<RouteResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
@@ -112,7 +115,7 @@ export default function Map() {
     );
   }, []);
 
-  // Update route source when route changes
+  // Update route source when route changes AND fit map to route
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -129,8 +132,25 @@ export default function Map() {
       return;
     }
 
+    // Update line geometry
     source.setData(route.geojson);
+
+    // Fit bounds to route
+    const coords = route.geojson.geometry.coordinates as [number, number][];
+    if (!coords || coords.length === 0) return;
+
+    const bounds = coords.reduce(
+      (b, c) => b.extend(c),
+      new mapboxgl.LngLatBounds(coords[0], coords[0])
+    );
+
+    map.fitBounds(bounds, {
+      padding: 60,
+      maxZoom: 15,
+      duration: 800,
+    });
   }, [route]);
+
 
   const distanceLabel = useMemo(() => {
     if (!route) return null;
@@ -139,8 +159,19 @@ export default function Map() {
     return `${kmVal.toFixed(2)} km • ${Math.round(minVal)} min`;
   }, [route]);
 
+  const isKmValid = useMemo(
+    () => Number.isFinite(km) && km > 0.2 && km < 100,
+    [km]
+  );
+
   async function generateRoute() {
     if (!center) return;
+
+    if (!isKmValid) {
+      setRouteError("Please enter a valid distance in km (e.g. 3, 5.5).");
+      return;
+    }
+
     setLoading(true);
     setRouteError(null);
 
@@ -165,31 +196,44 @@ export default function Map() {
       {error && <p className="text-sm text-red-600">{error}</p>}
       {routeError && <p className="text-sm text-red-600">{routeError}</p>}
 
-      <div className="flex gap-2 items-center">
-        <span className="text-sm">Distance:</span>
-        {[3, 5, 8, 10].map((d) => (
-          <button
-            key={d}
-            onClick={() => setKm(d)}
-            className={`px-3 py-1 rounded-lg border text-sm ${
-              km === d ? "bg-black text-white" : "bg-white"
-            }`}
-          >
-            {d} km
-          </button>
-        ))}
+      <div className="flex flex-wrap gap-3 items-center">
+        <label className="text-sm">
+          Distance (km):
+          <input
+            type="number"
+            min={0.5}
+            step={0.5}
+            value={kmInput}
+            onChange={(e) => {
+              const value = e.target.value;
+              setKmInput(value);
+              const num = parseFloat(value);
+              if (Number.isFinite(num)) {
+                setKm(num);
+              }
+            }}
+            className="ml-2 px-2 py-1 rounded border text-sm w-24"
+            placeholder="e.g. 5"
+          />
+        </label>
+
         <button
           onClick={generateRoute}
-          disabled={loading}
-          className="ml-auto px-3 py-1 rounded-lg bg-blue-600 text-white text-sm disabled:opacity-50"
+          disabled={loading || !isKmValid}
+          className="px-3 py-1 rounded-lg bg-blue-600 text-white text-sm disabled:opacity-50"
         >
-          {loading ? "Generating..." : "Generate"}
+          {loading ? "Generating..." : "Generate route"}
         </button>
       </div>
 
-      <div className="text-xs text-gray-600">
-        Start: lng {center.lng.toFixed(5)}, lat {center.lat.toFixed(5)}
-        {distanceLabel && <> • Route: {distanceLabel}</>}
+      <div className="text-xs text-gray-600 space-y-1">
+        <div>
+          Start: lng {center.lng.toFixed(5)}, lat {center.lat.toFixed(5)}
+        </div>
+        <div>
+          Target: {isKmValid ? `${km.toFixed(1)} km` : "invalid distance"}
+          {distanceLabel && <> • Route: {distanceLabel}</>}
+        </div>
       </div>
 
       <div ref={mapContainerRef} className="h-[70vh] w-full rounded-xl" />
