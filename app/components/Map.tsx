@@ -68,8 +68,54 @@ export default function Map() {
         source: "route",
         paint: {
           "line-width": 5,
+          "line-color": "#3b82f6", // Blue color
         },
       });
+
+      // Add arrow markers source
+      map.addSource("route-arrows", {
+        type: "geojson",
+        data: {
+          type: "FeatureCollection",
+          features: [],
+        },
+      });
+
+      // Create arrow icon (arrowhead only, no tail - pointing north/up by default)
+      const arrowSvg = `
+        <svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M 6 10 L 12 6 L 18 10 Z" 
+                stroke="#3b82f6" 
+                stroke-width="2.5" 
+                stroke-linecap="round"
+                stroke-linejoin="round" 
+                fill="#3b82f6"/>
+        </svg>
+      `.trim();
+
+      const img = new Image();
+      img.onload = () => {
+        if (!map.hasImage("arrow-icon")) {
+          map.addImage("arrow-icon", img);
+        }
+        // Add arrow layer after image is loaded
+        if (!map.getLayer("route-arrows")) {
+          map.addLayer({
+            id: "route-arrows",
+            type: "symbol",
+            source: "route-arrows",
+            layout: {
+              "icon-image": "arrow-icon",
+              "icon-size": 1.0,
+              "icon-rotate": ["get", "bearing"],
+              "icon-rotation-alignment": "map",
+              "icon-allow-overlap": true,
+              "icon-ignore-placement": true,
+            },
+          });
+        }
+      };
+      img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(arrowSvg);
     });
 
     mapRef.current = map;
@@ -115,12 +161,123 @@ export default function Map() {
     );
   }, []);
 
+  // Helper function to calculate bearing (direction) between two points in degrees
+  // Returns angle in degrees clockwise from north (0-360)
+  function calculateBearing(
+    point1: [number, number],
+    point2: [number, number]
+  ): number {
+    const lat1 = (point1[1] * Math.PI) / 180;
+    const lat2 = (point2[1] * Math.PI) / 180;
+    const dLng = ((point2[0] - point1[0]) * Math.PI) / 180;
+
+    const y = Math.sin(dLng) * Math.cos(lat2);
+    const x =
+      Math.cos(lat1) * Math.sin(lat2) -
+      Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+
+    const bearing = Math.atan2(y, x);
+    // Convert from radians to degrees and normalize to 0-360
+    return ((bearing * 180) / Math.PI + 360) % 360;
+  }
+
+  // Helper function to calculate angle difference between two bearings (in degrees)
+  function angleDifference(angle1: number, angle2: number): number {
+    let diff = Math.abs(angle1 - angle2);
+    if (diff > 180) {
+      diff = 360 - diff;
+    }
+    return diff;
+  }
+
+  // Helper function to check if a point is on a straight stretch
+  function isStraightStretch(
+    coordinates: [number, number][],
+    index: number,
+    windowSize: number = 5,
+    maxAngleChange: number = 15 // degrees - max allowed angle change for "straight"
+  ): boolean {
+    if (index < windowSize || index >= coordinates.length - windowSize) {
+      return false;
+    }
+
+    // Calculate bearings for segments before and after this point
+    const prevStart = coordinates[index - windowSize];
+    const prevEnd = coordinates[index];
+    const nextStart = coordinates[index];
+    const nextEnd = coordinates[index + windowSize];
+
+    const prevBearing = calculateBearing(prevStart, prevEnd);
+    const nextBearing = calculateBearing(nextStart, nextEnd);
+
+    // Check if the angle change is small (straight stretch)
+    const angleDiff = angleDifference(prevBearing, nextBearing);
+    return angleDiff <= maxAngleChange;
+  }
+
+  // Helper function to generate arrow markers along route
+  function generateArrowMarkers(
+    coordinates: [number, number][]
+  ): GeoJSON.FeatureCollection {
+    if (coordinates.length < 10) {
+      return { type: "FeatureCollection", features: [] };
+    }
+
+    const features: GeoJSON.Feature[] = [];
+    // Sample more points initially, then filter to straight stretches
+    const sampleSpacing = Math.max(3, Math.floor(coordinates.length / 20));
+    const minSpacing = Math.max(10, Math.floor(coordinates.length / 8)); // Minimum distance between arrows
+
+    let lastArrowIndex = -minSpacing; // Track last arrow position
+
+    // Sample points along the route
+    for (let i = sampleSpacing * 2; i < coordinates.length - sampleSpacing * 2; i += sampleSpacing) {
+      // Check if we have enough space since last arrow
+      if (i - lastArrowIndex < minSpacing) {
+        continue;
+      }
+
+      // Check if this is a straight stretch
+      if (!isStraightStretch(coordinates, i)) {
+        continue;
+      }
+
+      const current = coordinates[i];
+      // Look ahead a few points to get the direction we're traveling
+      const lookAhead = Math.min(5, Math.floor((coordinates.length - i) / 2));
+      const next = coordinates[Math.min(i + lookAhead, coordinates.length - 1)];
+      
+      // Calculate bearing (direction of travel)
+      const bearing = calculateBearing(current, next);
+
+      features.push({
+        type: "Feature",
+        properties: { bearing },
+        geometry: {
+          type: "Point",
+          coordinates: current,
+        },
+      });
+
+      lastArrowIndex = i;
+    }
+
+    return {
+      type: "FeatureCollection",
+      features,
+    };
+  }
+
   // Update route source when route changes AND fit map to route
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
     const source = map.getSource("route") as mapboxgl.GeoJSONSource | undefined;
+    const arrowSource = map.getSource(
+      "route-arrows"
+    ) as mapboxgl.GeoJSONSource | undefined;
+
     if (!source) return;
 
     if (!route) {
@@ -129,14 +286,43 @@ export default function Map() {
         geometry: { type: "LineString", coordinates: [] },
         properties: {},
       } as GeoJSON.Feature<GeoJSON.LineString>);
+      if (arrowSource) {
+        arrowSource.setData({
+          type: "FeatureCollection",
+          features: [],
+        });
+      }
       return;
     }
 
     // Update line geometry
     source.setData(route.geojson);
 
-    // Fit bounds to route
+    // Generate and update arrow markers
     const coords = route.geojson.geometry.coordinates as [number, number][];
+    if (coords && coords.length > 0 && arrowSource) {
+      const arrowMarkers = generateArrowMarkers(coords);
+      arrowSource.setData(arrowMarkers);
+
+      // Ensure arrow layer exists
+      if (map.hasImage("arrow-icon") && !map.getLayer("route-arrows")) {
+        map.addLayer({
+          id: "route-arrows",
+          type: "symbol",
+          source: "route-arrows",
+          layout: {
+            "icon-image": "arrow-icon",
+            "icon-size": 1.0,
+            "icon-rotate": ["get", "bearing"],
+            "icon-rotation-alignment": "map",
+            "icon-allow-overlap": true,
+            "icon-ignore-placement": true,
+          },
+        });
+      }
+    }
+
+    // Fit bounds to route
     if (!coords || coords.length === 0) return;
 
     const bounds = coords.reduce(
