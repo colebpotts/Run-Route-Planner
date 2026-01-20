@@ -12,11 +12,22 @@ const FALLBACK_CENTER: LngLat = {
   lat: 49.2827,
 };
 
+type RouteStep = {
+  instruction: string;
+  distance_m: number;
+  duration_s: number;
+  location: [number, number] | null; // [lng, lat]
+  type: string | null;
+  modifier: string | null;
+};
+
 type RouteResponse = {
   geojson: GeoJSON.Feature<GeoJSON.LineString>;
   distance_m: number;
   duration_s: number;
+  steps: RouteStep[];
 };
+
 
 export default function Map() {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
@@ -34,13 +45,16 @@ export default function Map() {
   const [loading, setLoading] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
 
+  const [showDirections, setShowDirections] = useState(false);
+
+
   // Create the map + base marker + empty route layer once
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
 
     const map = new mapboxgl.Map({
       container: mapContainerRef.current,
-      style: "mapbox://styles/mapbox/streets-v12",
+      style: "mapbox://styles/mapbox/outdoors-v12",
       center: [center.lng, center.lat],
       zoom: 13,
     });
@@ -67,8 +81,15 @@ export default function Map() {
         type: "line",
         source: "route",
         paint: {
-          "line-width": 5,
-          "line-color": "#3b82f6", // Blue color
+          "line-width": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            10, 3,
+            13, 5,
+            16, 7
+          ],
+          "line-color": "#2563eb", // blue-600
         },
       });
 
@@ -338,12 +359,24 @@ export default function Map() {
   }, [route]);
 
 
-  const distanceLabel = useMemo(() => {
-    if (!route) return null;
-    const kmVal = route.distance_m / 1000;
-    const minVal = route.duration_s / 60;
-    return `${kmVal.toFixed(2)} km • ${Math.round(minVal)} min`;
-  }, [route]);
+const distanceLabel = useMemo(() => {
+  if (!route) return null;
+
+  const kmVal = route.distance_m / 1000;
+  const minVal = route.duration_s / 60;
+
+  // derive pace from backend truth
+  const paceMinPerKm = minVal / kmVal;
+
+  const paceMin = Math.floor(paceMinPerKm);
+  const paceSec = Math.round((paceMinPerKm - paceMin) * 60);
+
+  return `${kmVal.toFixed(2)} km • ~${Math.round(
+    minVal
+  )} min @ ${paceMin}:${paceSec.toString().padStart(2, "0")} / km`;
+}, [route]);
+
+
 
   const isKmValid = useMemo(
     () => Number.isFinite(km) && km > 0.2 && km < 100,
@@ -377,52 +410,104 @@ export default function Map() {
     }
   }
 
-  return (
-    <div className="space-y-3">
-      {error && <p className="text-sm text-red-600">{error}</p>}
-      {routeError && <p className="text-sm text-red-600">{routeError}</p>}
+return (
+  <div className="space-y-3">
+    {error && <p className="text-sm text-red-600">{error}</p>}
+    {routeError && <p className="text-sm text-red-600">{routeError}</p>}
 
-      <div className="flex flex-wrap gap-3 items-center">
-        <label className="text-sm">
-          Distance (km):
-          <input
-            type="number"
-            min={0.5}
-            step={0.5}
-            value={kmInput}
-            onChange={(e) => {
-              const value = e.target.value;
-              setKmInput(value);
-              const num = parseFloat(value);
-              if (Number.isFinite(num)) {
-                setKm(num);
-              }
-            }}
-            className="ml-2 px-2 py-1 rounded border text-sm w-24"
-            placeholder="e.g. 5"
-          />
-        </label>
+    <div className="flex flex-wrap gap-3 items-center">
+      <label className="text-sm">
+        Distance (km):
+        <input
+          type="number"
+          min={0.5}
+          step={0.5}
+          value={kmInput}
+          onChange={(e) => {
+            const value = e.target.value;
+            setKmInput(value);
+            const num = parseFloat(value);
+            if (Number.isFinite(num)) {
+              setKm(num);
+            }
+          }}
+          className="ml-2 px-2 py-1 rounded border text-sm w-24"
+          placeholder="e.g. 5"
+        />
+      </label>
 
+      <button
+        onClick={generateRoute}
+        disabled={loading || !isKmValid}
+        className="px-3 py-1 rounded-lg bg-blue-600 text-white text-sm disabled:opacity-50"
+      >
+        {loading ? "Generating..." : "Generate route"}
+      </button>
+
+      {route && (
         <button
-          onClick={generateRoute}
-          disabled={loading || !isKmValid}
-          className="px-3 py-1 rounded-lg bg-blue-600 text-white text-sm disabled:opacity-50"
+          onClick={() => setShowDirections(true)}
+          className="px-3 py-1 rounded-lg border border-white/30 text-sm bg-white/10 text-white hover:bg-white/20"
         >
-          {loading ? "Generating..." : "Generate route"}
+          Directions
         </button>
-      </div>
-
-      <div className="text-xs text-gray-600 space-y-1">
-        <div>
-          Start: lng {center.lng.toFixed(5)}, lat {center.lat.toFixed(5)}
-        </div>
-        <div>
-          Target: {isKmValid ? `${km.toFixed(1)} km` : "invalid distance"}
-          {distanceLabel && <> • Route: {distanceLabel}</>}
-        </div>
-      </div>
-
-      <div ref={mapContainerRef} className="h-[70vh] w-full rounded-xl" />
+      )}
     </div>
-  );
+
+    <div className="text-xs text-gray-600 space-y-1">
+      <div>
+        Start: lng {center.lng.toFixed(5)}, lat {center.lat.toFixed(5)}
+      </div>
+      <div>
+        Target: {isKmValid ? `${km.toFixed(1)} km` : "invalid distance"}
+        {distanceLabel && <> • Route: {distanceLabel}</>}
+      </div>
+    </div>
+
+    <div ref={mapContainerRef} className="h-[70vh] w-full rounded-xl" />
+
+    {/* Directions Modal */}
+    {route && showDirections && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+        <div className="w-full max-w-md max-h-[75vh] bg-white rounded-xl shadow-xl flex flex-col">
+          <div className="flex items-center justify-between border-b px-4 py-3">
+            <h2 className="text-sm font-semibold text-gray-900">
+              Directions ({route.steps?.length ?? 0} steps)
+            </h2>
+            <button
+              onClick={() => setShowDirections(false)}
+              className="text-xs px-2 py-1 rounded-md border border-gray-300 hover:bg-gray-100"
+            >
+              Close
+            </button>
+          </div>
+
+          <div className="px-4 py-3 text-xs text-gray-600 border-b">
+            Target: {km.toFixed(1)} km
+            {distanceLabel && <> • Route: {distanceLabel}</>}
+          </div>
+
+          <div className="px-4 py-3 overflow-y-auto text-sm">
+            <ol className="space-y-2 list-decimal list-inside">
+              {route.steps?.map((s, idx) => {
+                const meters = Math.round(s.distance_m);
+                const mins = Math.max(1, Math.round(s.duration_s / 60));
+                return (
+                  <li key={idx}>
+                    <div className="font-medium text-gray-900">
+                      {s.instruction || "Continue"}
+                    </div>
+                    <div className="text-xs text-gray-600">
+                      {meters} m • ~{mins} min
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
+        </div>
+      </div>
+    )}
+  </div>
+);
 }

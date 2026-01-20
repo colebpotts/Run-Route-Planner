@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 
+const RUN_PACE_MIN_PER_KM = 6; // assumed running pace for estimates
+
+
 function metersToKm(m: number) {
   return m / 1000;
 }
@@ -42,7 +45,7 @@ async function fetchDirections(
   const coordStr = coords.map((c) => `${c.lng},${c.lat}`).join(";");
   const url =
     `https://api.mapbox.com/directions/v5/mapbox/walking/${coordStr}` +
-    `?geometries=geojson&overview=full&steps=false&access_token=${token}`;
+    `?geometries=geojson&overview=full&steps=true&access_token=${token}`;
 
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Directions API error: ${res.status}`);
@@ -140,9 +143,29 @@ export async function GET(req: Request) {
     },
   };
 
-  return NextResponse.json({
-    geojson: feature,
-    distance_m: best.distance,
-    duration_s: best.duration,
-  });
+  const steps =
+  best.legs?.flatMap((leg: any) =>
+    (leg.steps || []).map((s: any) => ({
+      instruction: s.maneuver?.instruction ?? "",
+      distance_m: s.distance ?? 0,
+      duration_s: s.duration ?? 0,
+      // optional, useful later for highlighting on map:
+      location: s.maneuver?.location ?? null, // [lng, lat]
+      type: s.maneuver?.type ?? null,
+      modifier: s.maneuver?.modifier ?? null,
+    }))
+  ) ?? [];
+
+const distance_m = best.distance;
+const distance_km = distance_m / 1000;
+const duration_s = distance_km * RUN_PACE_MIN_PER_KM * 60;
+
+return NextResponse.json({
+  geojson: feature,
+  distance_m,
+  duration_s,
+  steps,
+});
+
+
 }
