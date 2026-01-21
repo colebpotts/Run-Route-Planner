@@ -28,7 +28,6 @@ type RouteResponse = {
   steps: RouteStep[];
 };
 
-
 export default function Map() {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
@@ -46,7 +45,6 @@ export default function Map() {
   const [routeError, setRouteError] = useState<string | null>(null);
 
   const [showDirections, setShowDirections] = useState(false);
-
 
   // Create the map + base marker + empty route layer once
   useEffect(() => {
@@ -68,30 +66,80 @@ export default function Map() {
     map.on("load", () => {
       // Route source with empty line at first
       map.addSource("route", {
-        type: "geojson",
-        data: {
-          type: "Feature",
-          geometry: { type: "LineString", coordinates: [] },
-          properties: {},
-        } as GeoJSON.Feature<GeoJSON.LineString>,
-      });
+  type: "geojson",
+  data: {
+    type: "Feature",
+    geometry: { type: "LineString", coordinates: [] },
+    properties: {},
+  } as GeoJSON.Feature<GeoJSON.LineString>,
+});
 
-      map.addLayer({
-        id: "route-line",
-        type: "line",
-        source: "route",
-        paint: {
-          "line-width": [
-            "interpolate",
-            ["linear"],
-            ["zoom"],
-            10, 3,
-            13, 5,
-            16, 7
-          ],
-          "line-color": "#2563eb", // blue-600
-        },
-      });
+// Find the first label layer so we can draw the route *under* street names
+const layers = map.getStyle().layers;
+let labelLayerId: string | undefined;
+
+if (layers) {
+  for (const layer of layers) {
+    if (
+      layer.type === "symbol" &&
+      (layer.layout as any)?.["text-field"]
+    ) {
+      labelLayerId = layer.id;
+      break;
+    }
+  }
+}
+
+// Subtle white casing under the route to make it pop on any background
+map.addLayer(
+  {
+    id: "route-casing",
+    type: "line",
+    source: "route",
+    paint: {
+      "line-color": "rgba(255,255,255,0.9)",
+      "line-width": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        10,
+        5,
+        13,
+        7,
+        16,
+        9,
+      ],
+      "line-opacity": 0.85,
+    },
+  },
+  labelLayerId // insert just under labels if we found one
+);
+
+// Main route line: lighter blue, slightly thinner, on top of casing
+map.addLayer(
+  {
+    id: "route-line",
+    type: "line",
+    source: "route",
+    paint: {
+      "line-color": "#0ea5e9", // sky-500
+      "line-width": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        10,
+        3,
+        13,
+        5,
+        16,
+        7,
+      ],
+      "line-opacity": 0.9,
+    },
+  },
+  labelLayerId
+);
+
 
       // Add arrow markers source
       map.addSource("route-arrows", {
@@ -182,8 +230,7 @@ export default function Map() {
     );
   }, []);
 
-  // Helper function to calculate bearing (direction) between two points in degrees
-  // Returns angle in degrees clockwise from north (0-360)
+  // Helper function to calculate bearing between two points
   function calculateBearing(
     point1: [number, number],
     point2: [number, number]
@@ -198,31 +245,25 @@ export default function Map() {
       Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
 
     const bearing = Math.atan2(y, x);
-    // Convert from radians to degrees and normalize to 0-360
     return ((bearing * 180) / Math.PI + 360) % 360;
   }
 
-  // Helper function to calculate angle difference between two bearings (in degrees)
   function angleDifference(angle1: number, angle2: number): number {
     let diff = Math.abs(angle1 - angle2);
-    if (diff > 180) {
-      diff = 360 - diff;
-    }
+    if (diff > 180) diff = 360 - diff;
     return diff;
   }
 
-  // Helper function to check if a point is on a straight stretch
   function isStraightStretch(
     coordinates: [number, number][],
     index: number,
     windowSize: number = 5,
-    maxAngleChange: number = 15 // degrees - max allowed angle change for "straight"
+    maxAngleChange: number = 15
   ): boolean {
     if (index < windowSize || index >= coordinates.length - windowSize) {
       return false;
     }
 
-    // Calculate bearings for segments before and after this point
     const prevStart = coordinates[index - windowSize];
     const prevEnd = coordinates[index];
     const nextStart = coordinates[index];
@@ -231,12 +272,10 @@ export default function Map() {
     const prevBearing = calculateBearing(prevStart, prevEnd);
     const nextBearing = calculateBearing(nextStart, nextEnd);
 
-    // Check if the angle change is small (straight stretch)
     const angleDiff = angleDifference(prevBearing, nextBearing);
     return angleDiff <= maxAngleChange;
   }
 
-  // Helper function to generate arrow markers along route
   function generateArrowMarkers(
     coordinates: [number, number][]
   ): GeoJSON.FeatureCollection {
@@ -245,30 +284,23 @@ export default function Map() {
     }
 
     const features: GeoJSON.Feature[] = [];
-    // Sample more points initially, then filter to straight stretches
     const sampleSpacing = Math.max(3, Math.floor(coordinates.length / 20));
-    const minSpacing = Math.max(10, Math.floor(coordinates.length / 8)); // Minimum distance between arrows
+    const minSpacing = Math.max(10, Math.floor(coordinates.length / 8));
 
-    let lastArrowIndex = -minSpacing; // Track last arrow position
+    let lastArrowIndex = -minSpacing;
 
-    // Sample points along the route
-    for (let i = sampleSpacing * 2; i < coordinates.length - sampleSpacing * 2; i += sampleSpacing) {
-      // Check if we have enough space since last arrow
-      if (i - lastArrowIndex < minSpacing) {
-        continue;
-      }
-
-      // Check if this is a straight stretch
-      if (!isStraightStretch(coordinates, i)) {
-        continue;
-      }
+    for (
+      let i = sampleSpacing * 2;
+      i < coordinates.length - sampleSpacing * 2;
+      i += sampleSpacing
+    ) {
+      if (i - lastArrowIndex < minSpacing) continue;
+      if (!isStraightStretch(coordinates, i)) continue;
 
       const current = coordinates[i];
-      // Look ahead a few points to get the direction we're traveling
       const lookAhead = Math.min(5, Math.floor((coordinates.length - i) / 2));
       const next = coordinates[Math.min(i + lookAhead, coordinates.length - 1)];
-      
-      // Calculate bearing (direction of travel)
+
       const bearing = calculateBearing(current, next);
 
       features.push({
@@ -316,16 +348,13 @@ export default function Map() {
       return;
     }
 
-    // Update line geometry
     source.setData(route.geojson);
 
-    // Generate and update arrow markers
     const coords = route.geojson.geometry.coordinates as [number, number][];
     if (coords && coords.length > 0 && arrowSource) {
       const arrowMarkers = generateArrowMarkers(coords);
       arrowSource.setData(arrowMarkers);
 
-      // Ensure arrow layer exists
       if (map.hasImage("arrow-icon") && !map.getLayer("route-arrows")) {
         map.addLayer({
           id: "route-arrows",
@@ -343,7 +372,6 @@ export default function Map() {
       }
     }
 
-    // Fit bounds to route
     if (!coords || coords.length === 0) return;
 
     const bounds = coords.reduce(
@@ -358,25 +386,20 @@ export default function Map() {
     });
   }, [route]);
 
+  const distanceLabel = useMemo(() => {
+    if (!route) return null;
 
-const distanceLabel = useMemo(() => {
-  if (!route) return null;
+    const kmVal = route.distance_m / 1000;
+    const minVal = route.duration_s / 60;
+    const paceMinPerKm = minVal / kmVal;
 
-  const kmVal = route.distance_m / 1000;
-  const minVal = route.duration_s / 60;
+    const paceMin = Math.floor(paceMinPerKm);
+    const paceSec = Math.round((paceMinPerKm - paceMin) * 60);
 
-  // derive pace from backend truth
-  const paceMinPerKm = minVal / kmVal;
-
-  const paceMin = Math.floor(paceMinPerKm);
-  const paceSec = Math.round((paceMinPerKm - paceMin) * 60);
-
-  return `${kmVal.toFixed(2)} km • ~${Math.round(
-    minVal
-  )} min @ ${paceMin}:${paceSec.toString().padStart(2, "0")} / km`;
-}, [route]);
-
-
+    return `${kmVal.toFixed(2)} km • ~${Math.round(
+      minVal
+    )} min @ ${paceMin}:${paceSec.toString().padStart(2, "0")} / km`;
+  }, [route]);
 
   const isKmValid = useMemo(
     () => Number.isFinite(km) && km > 0.2 && km < 100,
@@ -410,104 +433,114 @@ const distanceLabel = useMemo(() => {
     }
   }
 
-return (
-  <div className="space-y-3">
-    {error && <p className="text-sm text-red-600">{error}</p>}
-    {routeError && <p className="text-sm text-red-600">{routeError}</p>}
+  return (
+    <div className="flex flex-col h-screen w-full bg-black">
+      {/* Top controls */}
+      <div className="p-4 space-y-3 text-white">
+        <h1 className="text-2xl font-semibold">RunRoutr</h1>
 
-    <div className="flex flex-wrap gap-3 items-center">
-      <label className="text-sm">
-        Distance (km):
-        <input
-          type="number"
-          min={0.5}
-          step={0.5}
-          value={kmInput}
-          onChange={(e) => {
-            const value = e.target.value;
-            setKmInput(value);
-            const num = parseFloat(value);
-            if (Number.isFinite(num)) {
-              setKm(num);
-            }
-          }}
-          className="ml-2 px-2 py-1 rounded border text-sm w-24"
-          placeholder="e.g. 5"
-        />
-      </label>
+        {error && <p className="text-sm text-red-400">{error}</p>}
+        {routeError && <p className="text-sm text-red-400">{routeError}</p>}
 
-      <button
-        onClick={generateRoute}
-        disabled={loading || !isKmValid}
-        className="px-3 py-1 rounded-lg bg-blue-600 text-white text-sm disabled:opacity-50"
-      >
-        {loading ? "Generating..." : "Generate route"}
-      </button>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+          <label className="text-sm flex items-center gap-2">
+            <span>Distance (km):</span>
+            <input
+              type="number"
+              min={0.5}
+              step={0.5}
+              value={kmInput}
+              onChange={(e) => {
+                const value = e.target.value;
+                setKmInput(value);
+                const num = parseFloat(value);
+                if (Number.isFinite(num)) {
+                  setKm(num);
+                }
+              }}
+              className="px-2 py-1 rounded border text-sm w-24 bg-black/40 border-white/30"
+              placeholder="e.g. 5"
+            />
+          </label>
 
-      {route && (
-        <button
-          onClick={() => setShowDirections(true)}
-          className="px-3 py-1 rounded-lg border border-white/30 text-sm bg-white/10 text-white hover:bg-white/20"
-        >
-          Directions
-        </button>
-      )}
-    </div>
-
-    <div className="text-xs text-gray-600 space-y-1">
-      <div>
-        Start: lng {center.lng.toFixed(5)}, lat {center.lat.toFixed(5)}
-      </div>
-      <div>
-        Target: {isKmValid ? `${km.toFixed(1)} km` : "invalid distance"}
-        {distanceLabel && <> • Route: {distanceLabel}</>}
-      </div>
-    </div>
-
-    <div ref={mapContainerRef} className="h-[70vh] w-full rounded-xl" />
-
-    {/* Directions Modal */}
-    {route && showDirections && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-        <div className="w-full max-w-md max-h-[75vh] bg-white rounded-xl shadow-xl flex flex-col">
-          <div className="flex items-center justify-between border-b px-4 py-3">
-            <h2 className="text-sm font-semibold text-gray-900">
-              Directions ({route.steps?.length ?? 0} steps)
-            </h2>
+          <div className="flex gap-2 sm:flex-1">
             <button
-              onClick={() => setShowDirections(false)}
-              className="text-xs px-2 py-1 rounded-md border border-gray-300 hover:bg-gray-100"
+              onClick={generateRoute}
+              disabled={loading || !isKmValid}
+              className="flex-1 px-3 py-1 rounded-lg bg-blue-600 text-white text-sm disabled:opacity-50"
             >
-              Close
+              {loading ? "Generating..." : "Generate route"}
             </button>
-          </div>
 
-          <div className="px-4 py-3 text-xs text-gray-600 border-b">
-            Target: {km.toFixed(1)} km
+            {route && (
+              <button
+                onClick={() => setShowDirections(true)}
+                className="px-3 py-1 rounded-lg border border-white/30 text-sm bg-white/10 text-white hover:bg-white/20"
+              >
+                Directions
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="text-xs text-gray-300 space-y-1">
+          <div>
+            Start: lng {center.lng.toFixed(5)}, lat {center.lat.toFixed(5)}
+          </div>
+          <div>
+            Target: {isKmValid ? `${km.toFixed(1)} km` : "invalid distance"}
             {distanceLabel && <> • Route: {distanceLabel}</>}
-          </div>
-
-          <div className="px-4 py-3 overflow-y-auto text-sm">
-            <ol className="space-y-2 list-decimal list-inside">
-              {route.steps?.map((s, idx) => {
-                const meters = Math.round(s.distance_m);
-                const mins = Math.max(1, Math.round(s.duration_s / 60));
-                return (
-                  <li key={idx}>
-                    <div className="font-medium text-gray-900">
-                      {s.instruction || "Continue"}
-                    </div>
-                    <div className="text-xs text-gray-600">
-                      {meters} m • ~{mins} min
-                    </div>
-                  </li>
-                );
-              })}
-            </ol>
           </div>
         </div>
       </div>
-    )}
-  </div>
-);
+
+      {/* Map fills the remaining space */}
+      <div className="flex-1">
+        <div ref={mapContainerRef} className="h-full w-full" />
+      </div>
+
+      {/* Directions Modal */}
+      {route && showDirections && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md max-h-[75vh] bg-white rounded-xl shadow-xl flex flex-col">
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <h2 className="text-sm font-semibold text-gray-900">
+                Directions ({route.steps?.length ?? 0} steps)
+              </h2>
+              <button
+                onClick={() => setShowDirections(false)}
+                className="text-xs px-2 py-1 rounded-md border border-gray-300 hover:bg-gray-100"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="px-4 py-3 text-xs text-gray-600 border-b">
+              Target: {km.toFixed(1)} km
+              {distanceLabel && <> • Route: {distanceLabel}</>}
+            </div>
+
+            <div className="px-4 py-3 overflow-y-auto text-sm">
+              <ol className="space-y-2 list-decimal list-inside">
+                {route.steps?.map((s, idx) => {
+                  const meters = Math.round(s.distance_m);
+                  const mins = Math.max(1, Math.round(s.duration_s / 60));
+                  return (
+                    <li key={idx}>
+                      <div className="font-medium text-gray-900">
+                        {s.instruction || "Continue"}
+                      </div>
+                      <div className="text-xs text-gray-600">
+                        {meters} m • ~{mins} min
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
