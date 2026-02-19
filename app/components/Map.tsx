@@ -45,6 +45,7 @@ export default function Map() {
   const [routeError, setRouteError] = useState<string | null>(null);
 
   const [showDirections, setShowDirections] = useState(false);
+  const [showMobileRouteForm, setShowMobileRouteForm] = useState(false);
 
   // Create the map + base marker + empty route layer once
   useEffect(() => {
@@ -80,9 +81,10 @@ let labelLayerId: string | undefined;
 
 if (layers) {
   for (const layer of layers) {
+    const symbolLayer = layer as mapboxgl.SymbolLayer;
     if (
       layer.type === "symbol" &&
-      (layer.layout as any)?.["text-field"]
+      symbolLayer.layout?.["text-field"]
     ) {
       labelLayerId = layer.id;
       break;
@@ -425,112 +427,203 @@ map.addLayer(
       if (!res.ok) throw new Error(data?.error || "Failed to generate route");
 
       setRoute(data);
-    } catch (err: any) {
+      setShowMobileRouteForm(false);
+    } catch (err: unknown) {
       console.error(err);
-      setRouteError(err.message || "Could not generate route");
+      setRouteError(
+        err instanceof Error ? err.message : "Could not generate route"
+      );
     } finally {
       setLoading(false);
     }
   }
 
+  const targetLabel = isKmValid ? `${km.toFixed(1)} km` : "invalid distance";
+
   return (
-    <div className="flex flex-col h-screen w-full bg-black">
-      {/* Top controls */}
-      <div className="p-4 space-y-3 text-white">
-        <h1 className="text-2xl font-semibold">RunRoutr</h1>
+    <div className="relative h-screen w-full overflow-hidden text-slate-900">
+      <div ref={mapContainerRef} className="h-full w-full" />
 
-        {error && <p className="text-sm text-red-400">{error}</p>}
-        {routeError && <p className="text-sm text-red-400">{routeError}</p>}
+      <div className="pointer-events-none absolute inset-x-0 top-0 p-3 sm:p-5">
+        <div className="glass-panel pointer-events-auto mx-auto w-full max-w-4xl rounded-3xl p-4 sm:p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-sky-700">
+                Route Planner
+              </p>
+              <h1 className="mt-1 text-2xl font-semibold text-slate-900 sm:text-3xl">
+                RunRoutr
+              </h1>
+            </div>
 
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-          <label className="text-sm flex items-center gap-2">
-            <span>Distance (km):</span>
-            <input
-              type="number"
-              min={0.5}
-              step={0.5}
-              value={kmInput}
-              onChange={(e) => {
-                const value = e.target.value;
-                setKmInput(value);
-                const num = parseFloat(value);
-                if (Number.isFinite(num)) {
-                  setKm(num);
-                }
-              }}
-              className="px-2 py-1 rounded border text-sm w-24 bg-black/40 border-white/30"
-              placeholder="e.g. 5"
-            />
-          </label>
+            <div className="flex flex-wrap gap-2 text-xs">
+              <span className="rounded-full border border-slate-200 bg-white/85 px-3 py-1 text-slate-600">
+                Target {targetLabel}
+              </span>
+              {distanceLabel && (
+                <span className="rounded-full border border-emerald-200 bg-emerald-50/85 px-3 py-1 text-emerald-700">
+                  {distanceLabel}
+                </span>
+              )}
+            </div>
+          </div>
 
-          <div className="flex gap-2 sm:flex-1">
+          {(error || routeError) && (
+            <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+              {routeError || error}
+            </div>
+          )}
+
+          <div className="mt-4 hidden gap-3 sm:grid sm:grid-cols-[minmax(170px,220px)_1fr]">
+            <label className="space-y-1">
+              <span className="text-xs font-medium uppercase tracking-[0.14em] text-slate-500">
+                Distance (km)
+              </span>
+              <input
+                type="number"
+                min={0.5}
+                step={0.5}
+                value={kmInput}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setKmInput(value);
+                  const num = parseFloat(value);
+                  if (Number.isFinite(num)) {
+                    setKm(num);
+                  }
+                }}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-base text-slate-900 shadow-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-200"
+                placeholder="e.g. 5"
+              />
+            </label>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              <button
+                onClick={generateRoute}
+                disabled={loading || !isKmValid}
+                className="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {loading ? "Generating..." : "Generate route"}
+              </button>
+
+              <button
+                onClick={() => setShowDirections(true)}
+                disabled={!route}
+                className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Directions
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-3 text-xs text-slate-500">
+            Start: {center.lat.toFixed(5)}, {center.lng.toFixed(5)}
+          </div>
+        </div>
+      </div>
+
+      <div className="pointer-events-none fixed inset-x-0 bottom-5 z-40 px-4 sm:hidden">
+        <div className="mx-auto flex w-full max-w-sm flex-col gap-2">
+          {showMobileRouteForm && (
+            <div className="glass-panel pointer-events-auto space-y-3 rounded-2xl p-3">
+              <label className="space-y-1">
+                <span className="text-xs font-medium uppercase tracking-[0.14em] text-slate-500">
+                  Distance (km)
+                </span>
+                <input
+                  type="number"
+                  min={0.5}
+                  step={0.5}
+                  value={kmInput}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setKmInput(value);
+                    const num = parseFloat(value);
+                    if (Number.isFinite(num)) {
+                      setKm(num);
+                    }
+                  }}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-base text-slate-900 shadow-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-200"
+                  placeholder="e.g. 5"
+                />
+              </label>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowMobileRouteForm(false)}
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={generateRoute}
+                  disabled={loading || !isKmValid}
+                  className="flex-1 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {loading ? "Generating..." : "Generate route"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/95 p-1.5 shadow-lg backdrop-blur">
             <button
-              onClick={generateRoute}
-              disabled={loading || !isKmValid}
-              className="flex-1 px-3 py-1 rounded-lg bg-blue-600 text-white text-sm disabled:opacity-50"
+              onClick={() => setShowMobileRouteForm((prev) => !prev)}
+              disabled={loading}
+              className="flex-1 rounded-full bg-slate-900 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {loading ? "Generating..." : "Generate route"}
+              {route ? "Edit Route" : "New Route"}
             </button>
-
             {route && (
               <button
                 onClick={() => setShowDirections(true)}
-                className="px-3 py-1 rounded-lg border border-white/30 text-sm bg-white/10 text-white hover:bg-white/20"
+                className="rounded-full border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
               >
                 Directions
               </button>
             )}
           </div>
         </div>
-
-        <div className="text-xs text-gray-300 space-y-1">
-          <div>
-            Start: lng {center.lng.toFixed(5)}, lat {center.lat.toFixed(5)}
-          </div>
-          <div>
-            Target: {isKmValid ? `${km.toFixed(1)} km` : "invalid distance"}
-            {distanceLabel && <> • Route: {distanceLabel}</>}
-          </div>
-        </div>
-      </div>
-
-      {/* Map fills the remaining space */}
-      <div className="flex-1">
-        <div ref={mapContainerRef} className="h-full w-full" />
       </div>
 
       {/* Directions Modal */}
       {route && showDirections && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-md max-h-[75vh] bg-white rounded-xl shadow-xl flex flex-col">
-            <div className="flex items-center justify-between border-b px-4 py-3">
-              <h2 className="text-sm font-semibold text-gray-900">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4">
+          <div className="glass-panel flex max-h-[80vh] w-full max-w-lg flex-col rounded-3xl">
+            <div className="flex items-center justify-between border-b border-slate-200/70 px-5 py-4">
+              <h2 className="text-sm font-semibold text-slate-900">
                 Directions ({route.steps?.length ?? 0} steps)
               </h2>
               <button
                 onClick={() => setShowDirections(false)}
-                className="text-xs px-2 py-1 rounded-md border border-gray-300 hover:bg-gray-100"
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 transition hover:bg-slate-50"
               >
                 Close
               </button>
             </div>
 
-            <div className="px-4 py-3 text-xs text-gray-600 border-b">
+            <div className="border-b border-slate-200/70 px-5 py-3 text-xs text-slate-600">
               Target: {km.toFixed(1)} km
               {distanceLabel && <> • Route: {distanceLabel}</>}
             </div>
 
-            <div className="px-4 py-3 overflow-y-auto text-sm">
-              <ol className="space-y-2 list-decimal list-inside">
+            <div className="overflow-y-auto px-5 py-4 text-sm">
+              <ol className="space-y-2">
                 {route.steps?.map((s, idx) => {
                   const meters = Math.round(s.distance_m);
                   const mins = Math.max(1, Math.round(s.duration_s / 60));
                   return (
-                    <li key={idx}>
-                      <div className="font-medium text-gray-900">
+                    <li
+                      key={idx}
+                      className="rounded-xl border border-slate-200/80 bg-white/80 px-3 py-2"
+                    >
+                      <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">
+                        Step {idx + 1}
+                      </div>
+                      <div className="mt-1 font-medium text-slate-900">
                         {s.instruction || "Continue"}
                       </div>
-                      <div className="text-xs text-gray-600">
+                      <div className="mt-1 text-xs text-slate-600">
                         {meters} m • ~{mins} min
                       </div>
                     </li>
