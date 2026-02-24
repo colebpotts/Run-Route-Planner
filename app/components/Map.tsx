@@ -2,6 +2,7 @@
 
 import mapboxgl from "mapbox-gl";
 import { useEffect, useRef, useState, useMemo } from "react";
+import { routeToGpx, validateGpxTrackMatchesRoute } from "@/lib/export/gpx";
 
 mapboxgl.accessToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN || "";
 
@@ -46,6 +47,8 @@ export default function Map() {
 
   const [showDirections, setShowDirections] = useState(false);
   const [showMobileRouteForm, setShowMobileRouteForm] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimeoutRef = useRef<number | null>(null);
 
   // Create the map + base marker + empty route layer once
   useEffect(() => {
@@ -197,6 +200,14 @@ map.addLayer(
       map.remove();
       mapRef.current = null;
       markerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimeoutRef.current !== null) {
+        window.clearTimeout(toastTimeoutRef.current);
+      }
     };
   }, []);
 
@@ -438,6 +449,66 @@ map.addLayer(
     }
   }
 
+  function showToast(message: string) {
+    setToastMessage(message);
+    if (toastTimeoutRef.current !== null) {
+      window.clearTimeout(toastTimeoutRef.current);
+    }
+    toastTimeoutRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+      toastTimeoutRef.current = null;
+    }, 3200);
+  }
+
+  function formatExportDate(date: Date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  function downloadTextFile(filename: string, content: string, mimeType: string) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function handleExportGpx() {
+    if (!route) return;
+
+    try {
+      const description = `${(route.distance_m / 1000).toFixed(2)} km • ~${Math.round(
+        route.duration_s / 60
+      )} min`;
+
+      const gpx = routeToGpx(route.geojson, {
+        name: "Run Routr Route",
+        description,
+      });
+
+      const validation = validateGpxTrackMatchesRoute(gpx, route.geojson);
+      if (!validation.ok) {
+        throw new Error(validation.reason || "GPX validation failed.");
+      }
+
+      const filename = `run-routr-${formatExportDate(new Date())}.gpx`;
+      downloadTextFile(filename, gpx, "application/gpx+xml;charset=utf-8");
+      showToast(
+        "Downloaded GPX. Import into Garmin Connect to send to your watch."
+      );
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : "Could not export route as GPX.";
+      setRouteError(message);
+    }
+  }
+
   const targetLabel = isKmValid ? `${km.toFixed(1)} km` : "invalid distance";
 
   return (
@@ -497,7 +568,7 @@ map.addLayer(
               />
             </label>
 
-            <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid gap-2 sm:grid-cols-3">
               <button
                 onClick={generateRoute}
                 disabled={loading || !isKmValid}
@@ -512,6 +583,14 @@ map.addLayer(
                 className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Directions
+              </button>
+
+              <button
+                onClick={handleExportGpx}
+                disabled={!route}
+                className="rounded-xl border border-sky-300 bg-sky-50 px-4 py-2.5 text-sm font-medium text-sky-800 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Export GPX
               </button>
             </div>
           </div>
@@ -575,16 +654,32 @@ map.addLayer(
               {route ? "Edit Route" : "New Route"}
             </button>
             {route && (
-              <button
-                onClick={() => setShowDirections(true)}
-                className="rounded-full border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-              >
-                Directions
-              </button>
+              <>
+                <button
+                  onClick={() => setShowDirections(true)}
+                  className="rounded-full border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+                >
+                  Directions
+                </button>
+                <button
+                  onClick={handleExportGpx}
+                  className="rounded-full border border-sky-300 bg-sky-50 px-4 py-2.5 text-sm font-medium text-sky-800 transition hover:bg-sky-100"
+                >
+                  Export GPX
+                </button>
+              </>
             )}
           </div>
         </div>
       </div>
+
+      {toastMessage && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-24 z-50 flex justify-center px-4 sm:bottom-6">
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/95 px-4 py-2 text-sm font-medium text-emerald-800 shadow-lg backdrop-blur">
+            {toastMessage}
+          </div>
+        </div>
+      )}
 
       {/* Directions Modal */}
       {route && showDirections && (

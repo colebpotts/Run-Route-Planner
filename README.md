@@ -28,10 +28,20 @@ The app attempts multiple loop shapes and tunes waypoint distances until the gen
 
 ---
 
+## Garmin export (GPX)
+
+After generating a route, click `Export GPX` to download a `.gpx` track file. This MVP export is client-side and designed for Garmin-compatible imports.
+
+### Get it onto your Garmin watch
+
+- Option A (recommended): Import the GPX into Garmin Connect (web or mobile) and save it as a Course, then sync to your watch.
+- Option B: Connect the watch by USB and copy the GPX file to `/Garmin/NewFiles` (supported on many devices), then safely eject and let the watch import it.
+
+---
+
 ## Getting started (local development)
 
 ### Prerequisites
 
 - Node.js (v18+ recommended)
 - A Mapbox account
-
