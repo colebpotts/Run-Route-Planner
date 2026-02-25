@@ -75,13 +75,46 @@ function segmentKey(
   return aKey < bKey ? `${aKey}|${bKey}` : `${bKey}|${aKey}`;
 }
 
-function getRouteOverlapPenaltyKm(route: MapboxRoute) {
+function getRouteOverlapStats(route: MapboxRoute) {
   const coords = route.geometry?.coordinates ?? [];
-  if (coords.length < 3) return 0;
+  if (coords.length < 3) {
+    return {
+      penaltyKm: 0,
+      microSpurMeters: 0,
+      tailSpurMeters: 0,
+    };
+  }
 
   const seenSegments = new Set<string>();
+  const recentSegments: Array<{
+    key: string;
+    meters: number;
+    cumMetersBefore: number;
+  }> = [];
   let totalMeters = 0;
   let overlapMeters = 0;
+  let localBacktrackMeters = 0;
+  let repeatedRunMeters = 0;
+  let shortRepeatedRunMeters = 0;
+  let microSpurMeters = 0;
+  let tailSpurMeters = 0;
+  let repeatedRunStartMeters = 0;
+
+  const flushRepeatedRun = () => {
+    // Allow long out-and-back returns, but penalize short overlap bursts
+    // that usually come from pointless little reversals.
+    if (repeatedRunMeters > 0 && repeatedRunMeters < 180) {
+      shortRepeatedRunMeters += repeatedRunMeters;
+    }
+    // Extra penalty for short overlap bursts near the end of the route,
+    // which tend to be "just add a few meters" tails.
+    const repeatedRunProgress = totalMeters > 0 ? repeatedRunStartMeters / totalMeters : 0;
+    if (repeatedRunMeters > 0 && repeatedRunMeters < 260 && repeatedRunProgress >= 0.65) {
+      tailSpurMeters += repeatedRunMeters;
+    }
+    repeatedRunMeters = 0;
+    repeatedRunStartMeters = 0;
+  };
 
   for (let i = 1; i < coords.length; i++) {
     const prev = coords[i - 1];
@@ -94,16 +127,69 @@ function getRouteOverlapPenaltyKm(route: MapboxRoute) {
 
     if (seenSegments.has(key)) {
       overlapMeters += segmentMeters;
+      if (repeatedRunMeters === 0) {
+        repeatedRunStartMeters = totalMeters - segmentMeters;
+      }
+      repeatedRunMeters += segmentMeters;
+
+      // If a segment repeats very soon after it was first used, it's usually
+      // a tiny out-and-back spur rather than a deliberate long return.
+      const recentMatch = [...recentSegments].reverse().find((s) => s.key === key);
+      if (recentMatch) {
+        localBacktrackMeters += segmentMeters;
+
+        const enclosedMeters = totalMeters - segmentMeters - recentMatch.cumMetersBefore;
+        const isTinySpurSegment = segmentMeters <= 90;
+        const isImmediateReversalArea = enclosedMeters <= 180;
+        if (isTinySpurSegment && isImmediateReversalArea) {
+          microSpurMeters += segmentMeters;
+        }
+      }
     } else {
+      flushRepeatedRun();
       seenSegments.add(key);
+    }
+
+    recentSegments.push({
+      key,
+      meters: segmentMeters,
+      cumMetersBefore: totalMeters - segmentMeters,
+    });
+    if (recentSegments.length > 14) {
+      recentSegments.shift();
     }
   }
 
-  if (totalMeters <= 0) return 0;
+  flushRepeatedRun();
+
+  if (totalMeters <= 0) {
+    return {
+      penaltyKm: 0,
+      microSpurMeters,
+      tailSpurMeters,
+    };
+  }
 
   const overlapRatio = overlapMeters / totalMeters;
-  // Convert overlap fraction to km-equivalent penalty for the scorer.
-  return overlapRatio * 1.2;
+  const localBacktrackKm = localBacktrackMeters / 1000;
+  const shortRepeatedRunKm = shortRepeatedRunMeters / 1000;
+  const microSpurKm = microSpurMeters / 1000;
+  const tailSpurKm = tailSpurMeters / 1000;
+
+  // General overlap remains a small penalty. Local short reversals get
+  // extra weight because they feel much worse to run than a long return leg.
+  const penaltyKm =
+    overlapRatio * 0.9 +
+    localBacktrackKm * 3.5 +
+    shortRepeatedRunKm * 1.8 +
+    microSpurKm * 6 +
+    tailSpurKm * 9;
+
+  return {
+    penaltyKm,
+    microSpurMeters,
+    tailSpurMeters,
+  };
 }
 
 function isGenericPathName(name: string | null) {
@@ -273,9 +359,12 @@ function getRouteSmoothnessPenaltyKm(route: MapboxRoute) {
 
   let shortTurnCount = 0;
   let totalTurnCount = 0;
+  let ultraShortTurnCount = 0;
+  let uTurnCount = 0;
 
   for (const step of steps) {
     const maneuverType = step?.maneuver?.type ?? "";
+    const maneuverModifier = step?.maneuver?.modifier ?? "";
     const isTurnLike =
       maneuverType.includes("turn") ||
       maneuverType === "fork" ||
@@ -284,28 +373,62 @@ function getRouteSmoothnessPenaltyKm(route: MapboxRoute) {
     if (!isTurnLike) continue;
 
     totalTurnCount += 1;
-    if ((step?.distance ?? 0) < 45) {
+    if (maneuverModifier.includes("uturn")) {
+      uTurnCount += 1;
+    }
+    const stepDistance = step?.distance ?? 0;
+    if (stepDistance < 25) {
+      ultraShortTurnCount += 1;
+    }
+    if (stepDistance < 45) {
       shortTurnCount += 1;
     }
   }
 
+  const routeKm = Math.max(metersToKm(route.distance ?? 0), 0.1);
+  const turnDensity = totalTurnCount / routeKm;
+
   // Convert maneuver complexity into a km-equivalent cost so distance can still dominate.
-  // Short turns are penalized more heavily than regular turns.
-  return shortTurnCount * 0.12 + totalTurnCount * 0.015;
+  // Short turns and turn-dense routes are penalized more heavily.
+  return (
+    uTurnCount * 0.45 +
+    ultraShortTurnCount * 0.2 +
+    shortTurnCount * 0.14 +
+    totalTurnCount * 0.03 +
+    Math.max(0, turnDensity - 2.4) * 0.12
+  );
+}
+
+function getAsymmetricDistancePenaltyKm(routeKm: number, targetKm: number) {
+  const diffKm = routeKm - targetKm;
+
+  if (diffKm >= 0) {
+    // Slightly long is preferable to slightly short.
+    return diffKm * 0.35;
+  }
+
+  // Penalize undershooting more than overshooting.
+  return Math.abs(diffKm) * 0.95;
 }
 
 function scoreRoute(route: MapboxRoute, targetKm: number) {
   const routeKm = metersToKm(route.distance ?? 0);
   const distanceDiffKm = Math.abs(routeKm - targetKm);
   const smoothnessPenaltyKm = getRouteSmoothnessPenaltyKm(route);
-  const overlapPenaltyKm = getRouteOverlapPenaltyKm(route);
+  const overlapStats = getRouteOverlapStats(route);
+  const overlapPenaltyKm = overlapStats.penaltyKm;
+  const weightedDistanceDiffKm = getAsymmetricDistancePenaltyKm(routeKm, targetKm);
+  const hasMicroSpur =
+    overlapStats.microSpurMeters >= 20 || overlapStats.tailSpurMeters >= 35;
 
   return {
     routeKm,
     distanceDiffKm,
+    weightedDistanceDiffKm,
     smoothnessPenaltyKm,
     overlapPenaltyKm,
-    score: distanceDiffKm + smoothnessPenaltyKm + overlapPenaltyKm,
+    hasMicroSpur,
+    score: weightedDistanceDiffKm + smoothnessPenaltyKm + overlapPenaltyKm,
   };
 }
 
@@ -378,17 +501,22 @@ export async function GET(req: Request) {
 
   // Try a few bearings, and for each one, tune the waypoint radius to match targetKm.
   // The winner balances distance accuracy and smoother, less turn-dense paths.
-  const bearingTries = 9;
-  const tuneSteps = 6;
-  const toleranceKm = 0.5;
+  const bearingTries = 22;
+  const tuneSteps = 7;
+  const toleranceKm = Math.min(1.2, Math.max(0.6, targetKm * 0.15));
 
-  let best: MapboxRoute | null = null;
-  let bestScore = Infinity;
+  let bestCleanLong: MapboxRoute | null = null;
+  let bestCleanLongScore = Infinity;
+  let bestCleanAny: MapboxRoute | null = null;
+  let bestCleanAnyScore = Infinity;
+  let bestFallback: MapboxRoute | null = null;
+  let bestFallbackScore = Infinity;
 
   for (let t = 0; t < bearingTries; t++) {
     const b1 = Math.random() * 360;
     const b2 = (b1 + 95 + Math.random() * 90) % 360;
-    const useThreeWaypoints = Math.random() < 0.7;
+    const useThreeWaypoints =
+      targetKm >= 8 ? Math.random() < 0.55 : Math.random() < 0.3;
     const b3 = (b2 + 80 + Math.random() * 80) % 360;
     const leg2Scale = 0.8 + Math.random() * 0.35;
     const leg3Scale = 0.65 + Math.random() * 0.35;
@@ -417,14 +545,30 @@ export async function GET(req: Request) {
         const route = data?.routes?.[0];
         if (!route) continue;
 
-        const { routeKm, distanceDiffKm, score } = scoreRoute(route, targetKm);
+        const { routeKm, distanceDiffKm, score, hasMicroSpur } = scoreRoute(
+          route,
+          targetKm
+        );
 
-        if (score < bestScore) {
-          bestScore = score;
-          best = route;
+        const isTooShort = routeKm < targetKm - toleranceKm;
+        const isAcceptableLength = routeKm <= targetKm + toleranceKm * 1.5;
+
+        if (!isTooShort && score < bestFallbackScore) {
+          bestFallbackScore = score;
+          bestFallback = route;
         }
 
-        if (distanceDiffKm <= toleranceKm) break;
+        if (!hasMicroSpur && score < bestCleanAnyScore) {
+          bestCleanAnyScore = score;
+          bestCleanAny = route;
+        }
+
+        if (!hasMicroSpur && !isTooShort && isAcceptableLength && score < bestCleanLongScore) {
+          bestCleanLongScore = score;
+          bestCleanLong = route;
+        }
+
+        if (!hasMicroSpur && routeKm >= targetKm && distanceDiffKm <= toleranceKm) break;
 
         // If route too long, shrink leg; if too short, expand leg
         if (routeKm > targetKm) {
@@ -439,6 +583,8 @@ export async function GET(req: Request) {
       }
     }
   }
+
+  const best = bestCleanLong ?? bestCleanAny ?? bestFallback;
 
   if (!best) {
     return NextResponse.json(

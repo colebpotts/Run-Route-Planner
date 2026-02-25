@@ -1,6 +1,7 @@
 "use client";
 
 import mapboxgl from "mapbox-gl";
+import posthog from "posthog-js";
 import { useEffect, useRef, useState, useMemo } from "react";
 import { routeToGpx, validateGpxTrackMatchesRoute } from "@/lib/export/gpx";
 
@@ -424,11 +425,19 @@ map.addLayer(
 
     if (!isKmValid) {
       setRouteError("Please enter a valid distance in km (e.g. 3, 5.5).");
+      posthog.capture("route_generate_invalid_distance", {
+        km_input: kmInput,
+      });
       return;
     }
 
     setLoading(true);
     setRouteError(null);
+    posthog.capture("route_generate_requested", {
+      target_km: km,
+      start_lat: Number(center.lat.toFixed(5)),
+      start_lng: Number(center.lng.toFixed(5)),
+    });
 
     try {
       const res = await fetch(
@@ -439,10 +448,24 @@ map.addLayer(
 
       setRoute(data);
       setShowMobileRouteForm(false);
+      posthog.capture("route_generated", {
+        target_km: km,
+        route_km:
+          typeof data?.distance_m === "number" ? Number((data.distance_m / 1000).toFixed(2)) : null,
+        duration_min:
+          typeof data?.duration_s === "number" ? Math.round(data.duration_s / 60) : null,
+        step_count: Array.isArray(data?.steps) ? data.steps.length : null,
+      });
     } catch (err: unknown) {
       console.error(err);
+      const message =
+        err instanceof Error ? err.message : "Could not generate route";
+      posthog.capture("route_generate_failed", {
+        target_km: km,
+        error: message,
+      });
       setRouteError(
-        err instanceof Error ? err.message : "Could not generate route"
+        message
       );
     } finally {
       setLoading(false);
@@ -499,12 +522,17 @@ map.addLayer(
 
       const filename = `run-routr-${formatExportDate(new Date())}.gpx`;
       downloadTextFile(filename, gpx, "application/gpx+xml;charset=utf-8");
+      posthog.capture("gpx_exported", {
+        route_km: Number((route.distance_m / 1000).toFixed(2)),
+        step_count: route.steps?.length ?? 0,
+      });
       showToast(
         "Downloaded GPX. Import into Garmin Connect to send to your watch."
       );
     } catch (err: unknown) {
       const message =
         err instanceof Error ? err.message : "Could not export route as GPX.";
+      posthog.capture("gpx_export_failed", { error: message });
       setRouteError(message);
     }
   }
