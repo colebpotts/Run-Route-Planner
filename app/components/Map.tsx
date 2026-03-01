@@ -23,11 +23,31 @@ type RouteStep = {
   modifier: string | null;
 };
 
-type RouteResponse = {
+type RouteQuality = {
+  score: number;
+  confidence: "strong" | "solid" | "mixed";
+  distance_diff_km: number;
+  overlap_penalty_km: number;
+  smoothness_penalty_km: number;
+  path_ratio: number;
+  scenic_ratio: number;
+  arterial_ratio: number;
+  turn_count: number;
+  highlight: string;
+  warnings: string[];
+};
+
+type RouteVariant = {
+  id: string;
   geojson: GeoJSON.Feature<GeoJSON.LineString>;
   distance_m: number;
   duration_s: number;
   steps: RouteStep[];
+  quality: RouteQuality;
+};
+
+type RouteApiResponse = {
+  route: RouteVariant;
 };
 
 export default function Map() {
@@ -42,7 +62,7 @@ export default function Map() {
   const [km, setKm] = useState<number>(5);
   const [kmInput, setKmInput] = useState<string>("5");
 
-  const [route, setRoute] = useState<RouteResponse | null>(null);
+  const [route, setRoute] = useState<RouteVariant | null>(null);
   const [loading, setLoading] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
 
@@ -420,6 +440,8 @@ map.addLayer(
     [km]
   );
 
+  const selectedQuality = route?.quality ?? null;
+
   async function generateRoute() {
     if (!center) return;
 
@@ -433,6 +455,7 @@ map.addLayer(
 
     setLoading(true);
     setRouteError(null);
+    setShowDirections(false);
     posthog.capture("route_generate_requested", {
       target_km: km,
       start_lat: Number(center.lat.toFixed(5)),
@@ -443,18 +466,23 @@ map.addLayer(
       const res = await fetch(
         `/api/route?lat=${center.lat}&lng=${center.lng}&km=${km}`
       );
-      const data = await res.json();
+      const data = (await res.json()) as RouteApiResponse & { error?: string };
       if (!res.ok) throw new Error(data?.error || "Failed to generate route");
 
-      setRoute(data);
+      setRoute(data.route ?? null);
       setShowMobileRouteForm(false);
       posthog.capture("route_generated", {
         target_km: km,
         route_km:
-          typeof data?.distance_m === "number" ? Number((data.distance_m / 1000).toFixed(2)) : null,
+          typeof data?.route?.distance_m === "number"
+            ? Number((data.route.distance_m / 1000).toFixed(2))
+            : null,
         duration_min:
-          typeof data?.duration_s === "number" ? Math.round(data.duration_s / 60) : null,
-        step_count: Array.isArray(data?.steps) ? data.steps.length : null,
+          typeof data?.route?.duration_s === "number"
+            ? Math.round(data.route.duration_s / 60)
+            : null,
+        step_count: Array.isArray(data?.route?.steps) ? data.route.steps.length : null,
+        route_confidence: data?.route?.quality?.confidence ?? null,
       });
     } catch (err: unknown) {
       console.error(err);
@@ -525,6 +553,7 @@ map.addLayer(
       posthog.capture("gpx_exported", {
         route_km: Number((route.distance_m / 1000).toFixed(2)),
         step_count: route.steps?.length ?? 0,
+        route_confidence: route.quality.confidence,
       });
       showToast(
         "Downloaded GPX. Import into Garmin Connect to send to your watch."
@@ -573,6 +602,29 @@ map.addLayer(
             </div>
           )}
 
+          {route && selectedQuality && (
+            <div className="mt-4 space-y-3">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="rounded-full border border-slate-200 bg-white/85 px-3 py-1 text-slate-600">
+                  {selectedQuality.turn_count} turns
+                </span>
+                <span className="rounded-full border border-slate-200 bg-white/85 px-3 py-1 text-slate-600">
+                  {selectedQuality.distance_diff_km.toFixed(2)} km off target
+                </span>
+                {selectedQuality.path_ratio >= 0.2 && (
+                  <span className="rounded-full border border-emerald-200 bg-emerald-50/85 px-3 py-1 text-emerald-700">
+                    {(selectedQuality.path_ratio * 100).toFixed(0)}% paths/trails
+                  </span>
+                )}
+                {selectedQuality.scenic_ratio >= 0.12 && (
+                  <span className="rounded-full border border-sky-200 bg-sky-50/85 px-3 py-1 text-sky-700">
+                    Scenic segments favored
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="mt-4 hidden gap-3 sm:grid sm:grid-cols-[minmax(170px,220px)_1fr]">
             <label className="space-y-1">
               <span className="text-xs font-medium uppercase tracking-[0.14em] text-slate-500">
@@ -602,7 +654,7 @@ map.addLayer(
                 disabled={loading || !isKmValid}
                 className="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {loading ? "Generating..." : "Generate route"}
+                {loading ? "Generating..." : route ? "Regenerate" : "Generate route"}
               </button>
 
               <button

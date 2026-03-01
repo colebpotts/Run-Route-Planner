@@ -40,6 +40,44 @@ type RouteStep = {
   name: string | null;
 };
 
+type RouteQuality = {
+  score: number;
+  confidence: "strong" | "solid" | "mixed";
+  distance_diff_km: number;
+  overlap_penalty_km: number;
+  smoothness_penalty_km: number;
+  path_ratio: number;
+  scenic_ratio: number;
+  arterial_ratio: number;
+  turn_count: number;
+  highlight: string;
+  warnings: string[];
+};
+
+type RouteVariant = {
+  id: string;
+  geojson: GeoJSON.Feature<GeoJSON.LineString>;
+  distance_m: number;
+  duration_s: number;
+  steps: RouteStep[];
+  quality: RouteQuality;
+};
+
+type RankedRoute = {
+  route: MapboxRoute;
+  score: number;
+  routeKm: number;
+  distanceDiffKm: number;
+  weightedDistanceDiffKm: number;
+  smoothnessPenaltyKm: number;
+  overlapPenaltyKm: number;
+  hasMicroSpur: boolean;
+  pathRatio: number;
+  scenicRatio: number;
+  arterialRatio: number;
+  turnCount: number;
+};
+
 function metersToKm(m: number) {
   return m / 1000;
 }
@@ -399,6 +437,84 @@ function getRouteSmoothnessPenaltyKm(route: MapboxRoute) {
   );
 }
 
+function getRouteRoadFeelStats(route: MapboxRoute) {
+  const steps = route.legs?.flatMap((leg) => leg.steps || []) ?? [];
+  let totalDistance = 0;
+  let pathDistance = 0;
+  let scenicDistance = 0;
+  let arterialDistance = 0;
+  let turnCount = 0;
+
+  const scenicTerms = [
+    "park",
+    "greenway",
+    "trail",
+    "river",
+    "lake",
+    "beach",
+    "waterfront",
+    "promenade",
+    "creek",
+    "forest",
+    "seawall",
+  ];
+  const arterialTerms = [
+    "highway",
+    "freeway",
+    "expressway",
+    "motorway",
+    "ramp",
+    "state route",
+    "county road",
+  ];
+
+  for (const step of steps) {
+    const stepDistance = Math.max(step.distance ?? 0, 0);
+    const name = step.name?.trim().toLowerCase() ?? "";
+    totalDistance += stepDistance;
+
+    const isTurnLike =
+      step.maneuver?.type === "turn" ||
+      step.maneuver?.type === "fork" ||
+      step.maneuver?.type === "merge" ||
+      step.maneuver?.type === "roundabout";
+
+    if (isTurnLike) {
+      turnCount += 1;
+    }
+
+    if (!name) continue;
+
+    if (isGenericPathName(name)) {
+      pathDistance += stepDistance;
+    }
+
+    if (scenicTerms.some((term) => name.includes(term))) {
+      scenicDistance += stepDistance;
+    }
+
+    if (arterialTerms.some((term) => name.includes(term))) {
+      arterialDistance += stepDistance;
+    }
+  }
+
+  if (totalDistance <= 0) {
+    return {
+      pathRatio: 0,
+      scenicRatio: 0,
+      arterialRatio: 0,
+      turnCount,
+    };
+  }
+
+  return {
+    pathRatio: pathDistance / totalDistance,
+    scenicRatio: scenicDistance / totalDistance,
+    arterialRatio: arterialDistance / totalDistance,
+    turnCount,
+  };
+}
+
 function getAsymmetricDistancePenaltyKm(routeKm: number, targetKm: number) {
   const diffKm = routeKm - targetKm;
 
@@ -420,6 +536,9 @@ function scoreRoute(route: MapboxRoute, targetKm: number) {
   const weightedDistanceDiffKm = getAsymmetricDistancePenaltyKm(routeKm, targetKm);
   const hasMicroSpur =
     overlapStats.microSpurMeters >= 20 || overlapStats.tailSpurMeters >= 35;
+  const roadFeel = getRouteRoadFeelStats(route);
+  const sceneryBonusKm = roadFeel.pathRatio * 0.4 + roadFeel.scenicRatio * 0.55;
+  const arterialPenaltyKm = roadFeel.arterialRatio * 0.75;
 
   return {
     routeKm,
@@ -428,7 +547,135 @@ function scoreRoute(route: MapboxRoute, targetKm: number) {
     smoothnessPenaltyKm,
     overlapPenaltyKm,
     hasMicroSpur,
-    score: weightedDistanceDiffKm + smoothnessPenaltyKm + overlapPenaltyKm,
+    pathRatio: roadFeel.pathRatio,
+    scenicRatio: roadFeel.scenicRatio,
+    arterialRatio: roadFeel.arterialRatio,
+    turnCount: roadFeel.turnCount,
+    score:
+      weightedDistanceDiffKm +
+      smoothnessPenaltyKm +
+      overlapPenaltyKm +
+      arterialPenaltyKm -
+      sceneryBonusKm,
+  };
+}
+
+function buildRouteSignature(route: MapboxRoute) {
+  const coords = route.geometry.coordinates;
+  if (coords.length === 0) return "empty";
+  const sampleEvery = Math.max(1, Math.floor(coords.length / 10));
+  return coords
+    .filter((_, index) => index % sampleEvery === 0)
+    .map(([lng, lat]) => `${lng.toFixed(3)},${lat.toFixed(3)}`)
+    .join("|");
+}
+
+function getConfidence(metrics: RankedRoute): RouteQuality["confidence"] {
+  if (
+    metrics.distanceDiffKm <= 0.25 &&
+    metrics.overlapPenaltyKm <= 0.2 &&
+    metrics.smoothnessPenaltyKm <= 0.65 &&
+    metrics.arterialRatio <= 0.08
+  ) {
+    return "strong";
+  }
+
+  if (
+    metrics.distanceDiffKm <= 0.55 &&
+    metrics.overlapPenaltyKm <= 0.45 &&
+    metrics.smoothnessPenaltyKm <= 1.1 &&
+    metrics.arterialRatio <= 0.18
+  ) {
+    return "solid";
+  }
+
+  return "mixed";
+}
+
+function getRouteHighlight(metrics: RankedRoute) {
+  if (metrics.pathRatio >= 0.35 || metrics.scenicRatio >= 0.22) {
+    return "More path-heavy and scenic than the typical option.";
+  }
+
+  if (metrics.overlapPenaltyKm <= 0.18 && metrics.smoothnessPenaltyKm <= 0.6) {
+    return "Clean loop with low backtracking and smoother turns.";
+  }
+
+  if (metrics.distanceDiffKm <= 0.2) {
+    return "Very close to your requested distance.";
+  }
+
+  return "Balanced option with acceptable route shape.";
+}
+
+function getRouteWarnings(metrics: RankedRoute) {
+  const warnings: string[] = [];
+
+  if (metrics.overlapPenaltyKm >= 0.4) {
+    warnings.push("Includes some repeated segments.");
+  }
+
+  if (metrics.smoothnessPenaltyKm >= 1.1) {
+    warnings.push("Has more tight turns than ideal.");
+  }
+
+  if (metrics.arterialRatio >= 0.12) {
+    warnings.push("May spend more time on larger roads.");
+  }
+
+  if (metrics.distanceDiffKm >= 0.6) {
+    warnings.push("Distance drifts from the target more than usual.");
+  }
+
+  return warnings;
+}
+
+function toRouteVariant(id: string, rankedRoute: RankedRoute): RouteVariant {
+  const feature: GeoJSON.Feature<GeoJSON.LineString> = {
+    type: "Feature",
+    properties: {},
+    geometry: {
+      type: "LineString",
+      coordinates: rankedRoute.route.geometry.coordinates,
+    },
+  };
+
+  const rawSteps: RouteStep[] =
+    rankedRoute.route.legs?.flatMap((leg) =>
+      (leg.steps || []).map((s) => ({
+        instruction: formatInstruction(s),
+        distance_m: s.distance ?? 0,
+        duration_s: s.duration ?? 0,
+        location: s.maneuver?.location ?? null,
+        type: s.maneuver?.type ?? null,
+        modifier: s.maneuver?.modifier ?? null,
+        name: s.name ?? null,
+      }))
+    ) ?? [];
+
+  const steps = simplifyRouteSteps(rawSteps);
+  const distance_m = rankedRoute.route.distance;
+  const distance_km = distance_m / 1000;
+
+  return {
+    id,
+    geojson: feature,
+    distance_m,
+    duration_s: distance_km * RUN_PACE_MIN_PER_KM * 60,
+    steps,
+    quality: {
+      score: Number(rankedRoute.score.toFixed(3)),
+      confidence: getConfidence(rankedRoute),
+      distance_diff_km: Number(rankedRoute.distanceDiffKm.toFixed(2)),
+      overlap_penalty_km: Number(rankedRoute.overlapPenaltyKm.toFixed(2)),
+      smoothness_penalty_km: Number(rankedRoute.smoothnessPenaltyKm.toFixed(2)),
+      path_ratio: Number(rankedRoute.pathRatio.toFixed(3)),
+      scenic_ratio: Number(rankedRoute.scenicRatio.toFixed(3)),
+      arterial_ratio: Number(rankedRoute.arterialRatio.toFixed(3)),
+      turn_count: rankedRoute.turnCount,
+      highlight: getRouteHighlight(rankedRoute),
+      warnings: getRouteWarnings(rankedRoute),
+    },
   };
 }
 
@@ -505,12 +752,7 @@ export async function GET(req: Request) {
   const tuneSteps = 7;
   const toleranceKm = Math.min(1.2, Math.max(0.6, targetKm * 0.15));
 
-  let bestCleanLong: MapboxRoute | null = null;
-  let bestCleanLongScore = Infinity;
-  let bestCleanAny: MapboxRoute | null = null;
-  let bestCleanAnyScore = Infinity;
-  let bestFallback: MapboxRoute | null = null;
-  let bestFallbackScore = Infinity;
+  const candidateRoutes = new Map<string, RankedRoute>();
 
   for (let t = 0; t < bearingTries; t++) {
     const b1 = Math.random() * 360;
@@ -545,30 +787,30 @@ export async function GET(req: Request) {
         const route = data?.routes?.[0];
         if (!route) continue;
 
-        const { routeKm, distanceDiffKm, score, hasMicroSpur } = scoreRoute(
+        const metrics = scoreRoute(
           route,
           targetKm
         );
+        const { routeKm, score, hasMicroSpur } = metrics;
 
         const isTooShort = routeKm < targetKm - toleranceKm;
-        const isAcceptableLength = routeKm <= targetKm + toleranceKm * 1.5;
+        const selectionScore =
+          score +
+          (hasMicroSpur ? 2.25 : 0) +
+          (isTooShort ? 1.5 : 0) +
+          (routeKm > targetKm + toleranceKm * 1.6 ? 0.45 : 0);
+        const signature = buildRouteSignature(route);
+        const existing = candidateRoutes.get(signature);
 
-        if (!isTooShort && score < bestFallbackScore) {
-          bestFallbackScore = score;
-          bestFallback = route;
+        if (!existing || selectionScore < existing.score) {
+          candidateRoutes.set(signature, {
+            ...metrics,
+            route,
+            score: selectionScore,
+          });
         }
 
-        if (!hasMicroSpur && score < bestCleanAnyScore) {
-          bestCleanAnyScore = score;
-          bestCleanAny = route;
-        }
-
-        if (!hasMicroSpur && !isTooShort && isAcceptableLength && score < bestCleanLongScore) {
-          bestCleanLongScore = score;
-          bestCleanLong = route;
-        }
-
-        if (!hasMicroSpur && routeKm >= targetKm && distanceDiffKm <= toleranceKm) break;
+        if (!hasMicroSpur && routeKm >= targetKm && metrics.distanceDiffKm <= toleranceKm) break;
 
         // If route too long, shrink leg; if too short, expand leg
         if (routeKm > targetKm) {
@@ -584,47 +826,21 @@ export async function GET(req: Request) {
     }
   }
 
-  const best = bestCleanLong ?? bestCleanAny ?? bestFallback;
+  const rankedRoutes = [...candidateRoutes.values()]
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 3);
 
-  if (!best) {
+  if (rankedRoutes.length === 0) {
     return NextResponse.json(
       { error: "Could not generate a route" },
       { status: 500 }
     );
   }
 
-  const feature: GeoJSON.Feature<GeoJSON.LineString> = {
-    type: "Feature",
-    properties: {},
-    geometry: {
-      type: "LineString",
-      coordinates: best.geometry.coordinates,
-    },
-  };
-
-  const rawSteps: RouteStep[] =
-    best.legs?.flatMap((leg) =>
-      (leg.steps || []).map((s) => ({
-        instruction: formatInstruction(s),
-        distance_m: s.distance ?? 0,
-        duration_s: s.duration ?? 0,
-        // optional, useful later for highlighting on map:
-        location: s.maneuver?.location ?? null, // [lng, lat]
-        type: s.maneuver?.type ?? null,
-        modifier: s.maneuver?.modifier ?? null,
-        name: s.name ?? null,
-      }))
-    ) ?? [];
-  const steps = simplifyRouteSteps(rawSteps);
-
-  const distance_m = best.distance;
-  const distance_km = distance_m / 1000;
-  const duration_s = distance_km * RUN_PACE_MIN_PER_KM * 60;
-
   return NextResponse.json({
-    geojson: feature,
-    distance_m,
-    duration_s,
-    steps,
+    route: toRouteVariant("route-1", rankedRoutes[0]),
+    routes: rankedRoutes.map((rankedRoute, index) =>
+      toRouteVariant(`route-${index + 1}`, rankedRoute)
+    ),
   });
 }
