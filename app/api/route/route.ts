@@ -839,8 +839,5 @@ export async function GET(req: Request) {
 
   return NextResponse.json({
     route: toRouteVariant("route-1", rankedRoutes[0]),
-    routes: rankedRoutes.map((rankedRoute, index) =>
-      toRouteVariant(`route-${index + 1}`, rankedRoute)
-    ),
   });
 }
