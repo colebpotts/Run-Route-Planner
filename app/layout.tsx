@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Analytics } from "@vercel/analytics/next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Suspense } from "react";
 import PostHogAnalytics from "./components/PostHogAnalytics";
 import "./globals.css";
 
@@ -34,7 +35,9 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <PostHogAnalytics />
+        <Suspense fallback={null}>
+          <PostHogAnalytics />
+        </Suspense>
         <Analytics />
         {children}
       </body>
